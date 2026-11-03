@@ -149,6 +149,11 @@ struct TempScreen: View {
             .navigationBarTitleDisplayMode(profile.tempControl == .sides ? .large : .inline)
             .settingsToolbar()
             .toolbar {
+                if deviceManager.isConnected {
+                    ToolbarItem(placement: .topBarTrailing) { NoiseButton() }
+                }
+            }
+            .toolbar {
                 switch profile.tempControl {
                 case .dial, .stepper:
                     ToolbarItem(placement: .topBarLeading) { header }

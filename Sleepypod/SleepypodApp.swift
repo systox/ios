@@ -120,21 +120,26 @@ struct ContentView: View {
                 Tab(value: "temp") {
                     TempScreen()
                 } label: { tabLabel("Temp", "thermometer.medium") }
-                Tab(value: "schedule") {
-                    if isConnected {
-                        ScheduleScreen()
-                    } else {
-                        NavigationStack { DisconnectedTabView(tab: "Schedule", selectedTab: $selectedTab).settingsToolbar() }
-                    }
+                Tab(value: "podschedule") {
+                    if isConnected { PodPageTab(path: "/en/schedule") }
+                    else { NavigationStack { DisconnectedTabView(tab: "Schedule", selectedTab: $selectedTab).settingsToolbar() } }
                 } label: { tabLabel("Schedule", "calendar") }
                 Tab(value: "sleep") {
                     if isConnected { SleepScreen() }
                     else { NavigationStack { DisconnectedTabView(tab: "Sleep", selectedTab: $selectedTab).settingsToolbar() } }
                 } label: { tabLabel("Sleep", "moon") }
                 Tab(value: "tonight") {
-                    if isConnected { TonightTab() }
+                    if isConnected { PodPageTab(path: "/en/tonight") }
                     else { NavigationStack { DisconnectedTabView(tab: "Tonight", selectedTab: $selectedTab).settingsToolbar() } }
                 } label: { tabLabel("Tonight", "bed.double") }
+                // The app's own schedule screen, kept until the web one above has replaced all of it.
+                Tab(value: "schedule") {
+                    if isConnected {
+                        ScheduleScreen()
+                    } else {
+                        NavigationStack { DisconnectedTabView(tab: "Classic", selectedTab: $selectedTab).settingsToolbar() }
+                    }
+                } label: { tabLabel("Classic", "calendar.badge.clock") }
             }
             .tabBarMinimizeBehavior(.onScrollDown)
             .onChange(of: selectedTab) {
@@ -252,23 +257,33 @@ struct ContentView: View {
     }
 }
 
-/// The Pod's Tonight page in its own tab. It loads from the same server the app
-/// talks to, so a change to the page needs no app update.
-struct TonightTab: View {
+/// A page from the Pod's own web app in a tab. It loads from the same server
+/// the app talks to, so a change to the page needs no app update.
+struct PodPageTab: View {
     @Environment(SettingsManager.self) private var settingsManager
+    let path: String
 
     var body: some View {
-        if let url = URL(string: "http://\(settingsManager.podIP):3000/en/tonight") {
-            TonightWebView(url: url)
+        if let url = URL(string: "http://\(settingsManager.podIP):3000\(path)") {
+            PodWebView(url: url)
         }
     }
 }
 
-struct TonightWebView: UIViewRepresentable {
+struct PodWebView: UIViewRepresentable {
     let url: URL
 
+    /// The web app's own tab bar would sit above the app's, so it's hidden here.
+    private static let hideWebTabBar = WKUserScript(
+        source: "var s=document.createElement('style');s.textContent='nav[aria-label=\"Main\"]{display:none!important}';document.documentElement.appendChild(s);",
+        injectionTime: .atDocumentEnd,
+        forMainFrameOnly: true
+    )
+
     func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView()
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.addUserScript(Self.hideWebTabBar)
+        let view = WKWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
         view.load(URLRequest(url: url))
         return view
@@ -277,5 +292,55 @@ struct TonightWebView: UIViewRepresentable {
     func updateUIView(_ view: WKWebView, context: Context) {
         // A new Pod address loads the page again; anything else keeps where the person is.
         if view.url?.host != url.host { view.load(URLRequest(url: url)) }
+    }
+}
+
+/// White noise on or off from the Temp screen. Its settings live on the Tonight tab.
+struct NoiseButton: View {
+    @Environment(SettingsManager.self) private var settingsManager
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var on = false
+    @State private var busy = false
+
+    var body: some View {
+        Button(on ? "Stop white noise" : "Play white noise", systemImage: on ? "speaker.wave.2.fill" : "speaker.slash") {
+            Task { await toggle() }
+        }
+        .tint(on ? Theme.text1 : Theme.text2)
+        .disabled(busy)
+        .task(id: scenePhase) { await refresh() }
+    }
+
+    private func endpoint(_ procedure: String, query: String = "") -> URL? {
+        URL(string: "http://\(settingsManager.podIP):3000/api/trpc/\(procedure)\(query)")
+    }
+
+    private func read(_ data: Data) -> Bool? {
+        guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = body["result"] as? [String: Any],
+              let payload = result["data"] as? [String: Any],
+              let json = payload["json"] as? [String: Any] else { return nil }
+        return json["on"] as? Bool
+    }
+
+    private func refresh() async {
+        guard let url = endpoint("fork.noiseStatus", query: "?input=%7B%22json%22%3A%7B%7D%7D"),
+              let response = try? await URLSession.shared.data(from: url),
+              let state = read(response.0) else { return }
+        on = state
+    }
+
+    private func toggle() async {
+        guard let url = endpoint("fork.setNoise") else { return }
+        busy = true
+        defer { busy = false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["json": ["on": !on]])
+        if let response = try? await URLSession.shared.data(for: request), let state = read(response.0) {
+            on = state
+            Haptics.tap()
+        }
     }
 }
