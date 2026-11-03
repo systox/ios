@@ -275,7 +275,7 @@ struct PodWebView: UIViewRepresentable {
 
     /// The web app's own tab bar would sit above the app's, so it's hidden here.
     private static let hideWebTabBar = WKUserScript(
-        source: "var s=document.createElement('style');s.textContent='nav[aria-label=\"Main\"]{display:none!important}';document.documentElement.appendChild(s);",
+        source: "var s=document.createElement('style');s.textContent='nav[aria-label=\"Main\"]{display:none!important}';(document.head||document.documentElement).appendChild(s);",
         injectionTime: .atDocumentEnd,
         forMainFrameOnly: true
     )
@@ -308,7 +308,13 @@ struct NoiseButton: View {
         }
         .tint(on ? Theme.text1 : Theme.text2)
         .disabled(busy)
-        .task(id: scenePhase) { await refresh() }
+        .task(id: scenePhase) {
+            // Noise can stop by itself or from the cover, so the button keeps checking while it's on screen.
+            while !Task.isCancelled && scenePhase == .active {
+                await refresh()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
     }
 
     private func endpoint(_ procedure: String, query: String = "") -> URL? {
@@ -334,6 +340,8 @@ struct NoiseButton: View {
         guard let url = endpoint("fork.setNoise") else { return }
         busy = true
         defer { busy = false }
+        // Act on what the Pod says now, not on what this button last saw.
+        await refresh()
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
