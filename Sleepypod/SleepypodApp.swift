@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 @main
 struct SleepypodApp: App {
@@ -130,6 +131,10 @@ struct ContentView: View {
                     if isConnected { SleepScreen() }
                     else { NavigationStack { DisconnectedTabView(tab: "Sleep", selectedTab: $selectedTab).settingsToolbar() } }
                 } label: { tabLabel("Sleep", "moon") }
+                Tab(value: "tonight") {
+                    if isConnected { TonightTab() }
+                    else { NavigationStack { DisconnectedTabView(tab: "Tonight", selectedTab: $selectedTab).settingsToolbar() } }
+                } label: { tabLabel("Tonight", "bed.double") }
             }
             .tabBarMinimizeBehavior(.onScrollDown)
             .onChange(of: selectedTab) {
@@ -244,5 +249,33 @@ struct ContentView: View {
         statusManager.switchBackend(client)
         sensorStream.disconnect()
         sensorStream.connect()
+    }
+}
+
+/// The Pod's Tonight page in its own tab. It loads from the same server the app
+/// talks to, so a change to the page needs no app update.
+struct TonightTab: View {
+    @Environment(SettingsManager.self) private var settingsManager
+
+    var body: some View {
+        if let url = URL(string: "http://\(settingsManager.podIP):3000/en/tonight") {
+            TonightWebView(url: url)
+        }
+    }
+}
+
+struct TonightWebView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        let view = WKWebView()
+        view.allowsBackForwardNavigationGestures = true
+        view.load(URLRequest(url: url))
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {
+        // A new Pod address loads the page again; anything else keeps where the person is.
+        if view.url?.host != url.host { view.load(URLRequest(url: url)) }
     }
 }
