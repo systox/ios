@@ -295,7 +295,7 @@ struct PodWebView: UIViewRepresentable {
     }
 }
 
-/// White noise on or off from the Temp screen. Its settings live on the Tonight tab.
+/// White noise on or off from the Temp screen's toolbar. Its settings are in the card at the bottom of the screen.
 struct NoiseButton: View {
     @Environment(SettingsManager.self) private var settingsManager
     @Environment(\.scenePhase) private var scenePhase
@@ -349,6 +349,214 @@ struct NoiseButton: View {
         if let response = try? await URLSession.shared.data(for: request), let state = read(response.0) {
             on = state
             Haptics.tap()
+        }
+    }
+}
+
+/// What the Pod says about white noise: whether it plays, and every setting for it.
+struct NoiseState: Equatable {
+    var on = false
+    var playing = false
+    var problem: String?
+    var volume = 20
+    var color = "pink"
+    var fadeSeconds = 0
+    var auto = false
+    var side = "either"
+    var waitMinutes = 60
+    var emptyMinutes = 10
+    var maxHours = 12.0
+    var middle: [String: String] = [:]
+
+    /// The middle-button gestures a person can actually make, in the order shown.
+    static let middleKeys = ["middleSingle", "middleDouble", "middleTriple"]
+
+    mutating func read(pod: [String: Any]) {
+        volume = (pod["noiseVolume"] as? NSNumber)?.intValue ?? volume
+        color = pod["noiseColor"] as? String ?? color
+        fadeSeconds = (pod["noiseFadeSeconds"] as? NSNumber)?.intValue ?? fadeSeconds
+        auto = pod["noiseAuto"] as? Bool ?? auto
+        side = pod["noiseSide"] as? String ?? side
+        waitMinutes = (pod["noiseWaitMinutes"] as? NSNumber)?.intValue ?? waitMinutes
+        emptyMinutes = (pod["noiseEmptyMinutes"] as? NSNumber)?.intValue ?? emptyMinutes
+        maxHours = (pod["noiseMaxHours"] as? NSNumber)?.doubleValue ?? maxHours
+        for key in Self.middleKeys { middle[key] = pod[key] as? String ?? middle[key] }
+    }
+
+    mutating func read(noise: [String: Any]) {
+        on = noise["on"] as? Bool ?? on
+        playing = noise["playing"] as? Bool ?? playing
+        problem = noise["problem"] as? String
+    }
+}
+
+/// White noise with all its settings, at the bottom of the Temp screen.
+struct NoiseCard: View {
+    struct Gesture: Identifiable {
+        let key: String
+        let label: String
+        var id: String { key }
+    }
+
+    static let gestures = [
+        Gesture(key: "middleSingle", label: "One press"),
+        Gesture(key: "middleDouble", label: "Two presses"),
+        Gesture(key: "middleTriple", label: "Three presses"),
+    ]
+
+    @Environment(SettingsManager.self) private var settingsManager
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var state = NoiseState()
+    @State private var loaded = false
+    @State private var volume = 20.0
+    @State private var editingVolume = false
+    @State private var busy = false
+    @State private var error: String?
+
+    private var status: String {
+        if !state.on { return "Off" }
+        if state.volume == 0 { return "On but silent" }
+        return state.playing ? "Playing" : "Starting"
+    }
+
+    var body: some View {
+        // A stack, not a Group: a Group with nothing in it yet has nothing to run the task on.
+        VStack(spacing: 0) {
+            if loaded { content.cardStyle() }
+        }
+        .task(id: scenePhase) {
+            // Noise can stop by itself or from the cover, so the card keeps checking while it's on screen.
+            while !Task.isCancelled && scenePhase == .active {
+                await refresh()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Eyebrow("WHITE NOISE")
+                Spacer(minLength: 8)
+                Text(status).font(.mono(12, relativeTo: .caption)).foregroundStyle(Theme.text2)
+            }
+            if state.on, !state.playing, let problem = state.problem {
+                Text("White noise isn't playing. \(problem)").font(.footnote).foregroundStyle(Theme.amber)
+            }
+            Button(state.on ? "Stop" : "Play", systemImage: state.on ? "stop.fill" : "play.fill") {
+                Task { await setNoise(!state.on) }
+            }
+            .buttonStyle(.bordered)
+            .disabled(busy)
+            HStack(spacing: 10) {
+                Text("Volume")
+                Slider(value: $volume, in: 0...100, step: 5, onEditingChanged: { editing in
+                    editingVolume = editing
+                    if !editing { Task { await save(["noiseVolume": Int(volume)]) } }
+                })
+                .accessibilityLabel("White noise volume")
+                Text("\(Int(volume))").font(.mono(12, relativeTo: .caption)).foregroundStyle(Theme.text2)
+                    .frame(minWidth: 28, alignment: .trailing)
+            }
+            Picker("Sound", selection: setting(\.color, "noiseColor")) {
+                Text("Pink").tag("pink")
+                Text("Brown").tag("brown")
+                Text("White").tag("white")
+            }
+            Stepper("Fades out over \(state.fadeSeconds) s", value: setting(\.fadeSeconds, "noiseFadeSeconds"), in: 0...300, step: 5)
+            Divider()
+            Toggle("Start when the curve starts", isOn: setting(\.auto, "noiseAuto"))
+            Text("Plays from the curve's bedtime until everyone is out of bed.").font(.footnote).foregroundStyle(Theme.text2)
+            Picker("Whose curve", selection: setting(\.side, "noiseSide")) {
+                Text("Whoever goes to bed first").tag("either")
+                Text(settingsManager.leftName).tag("left")
+                Text(settingsManager.rightName).tag("right")
+            }
+            Stepper("Waits for someone \(state.waitMinutes) min", value: setting(\.waitMinutes, "noiseWaitMinutes"), in: 5...240, step: 5)
+            Stepper("Stops when all are out \(state.emptyMinutes) min", value: setting(\.emptyMinutes, "noiseEmptyMinutes"), in: 1...120)
+            Stepper("Longest \(state.maxHours.formatted()) h", value: setting(\.maxHours, "noiseMaxHours"), in: 1...16, step: 0.5)
+            Divider()
+            Eyebrow("MIDDLE BUTTON")
+            ForEach(Self.gestures) { gesture in
+                Picker(gesture.label, selection: middle(gesture.key)) {
+                    Text("Nothing").tag("none")
+                    Text("White noise on or off").tag("noise")
+                }
+            }
+            if let error { Text(error).font(.footnote).foregroundStyle(Theme.amber) }
+        }
+        .font(.subheadline)
+        .tint(Theme.text1)
+    }
+
+    /// A setting that saves to the Pod as soon as it changes.
+    private func setting<Value: Sendable>(_ path: WritableKeyPath<NoiseState, Value> & Sendable, _ key: String) -> Binding<Value> {
+        Binding(get: { state[keyPath: path] }, set: { value in
+            state[keyPath: path] = value
+            Task { await save([key: value]) }
+        })
+    }
+
+    private func middle(_ key: String) -> Binding<String> {
+        Binding(get: { state.middle[key] ?? "none" }, set: { value in
+            state.middle[key] = value
+            Task { await save([key: value]) }
+        })
+    }
+
+    private func endpoint(_ procedure: String, query: String = "") -> URL? {
+        URL(string: "http://\(settingsManager.podIP):3000/api/trpc/\(procedure)\(query)")
+    }
+
+    private func json(_ data: Data) -> [String: Any]? {
+        guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = body["result"] as? [String: Any],
+              let payload = result["data"] as? [String: Any] else { return nil }
+        return payload["json"] as? [String: Any]
+    }
+
+    private func post(_ procedure: String, _ input: [String: Any]) async -> [String: Any]? {
+        guard let url = endpoint(procedure) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["json": input])
+        guard let response = try? await URLSession.shared.data(for: request) else { return nil }
+        return json(response.0)
+    }
+
+    private func refresh() async {
+        guard let url = endpoint("fork.overview", query: "?input=%7B%22json%22%3A%7B%7D%7D"),
+              let response = try? await URLSession.shared.data(from: url),
+              let overview = json(response.0),
+              let pod = overview["pod"] as? [String: Any],
+              let noise = overview["noise"] as? [String: Any] else { return }
+        state.read(pod: pod)
+        state.read(noise: noise)
+        if !editingVolume { volume = Double(state.volume) }
+        loaded = true
+    }
+
+    private func save(_ patch: [String: Any]) async {
+        if let saved = await post("fork.setPodSettings", ["patch": patch]) {
+            state.read(pod: saved)
+            error = nil
+        } else {
+            error = "Not saved. Check the Pod is reachable."
+            await refresh()
+        }
+        if !editingVolume { volume = Double(state.volume) }
+    }
+
+    private func setNoise(_ on: Bool) async {
+        busy = true
+        defer { busy = false }
+        if let noise = await post("fork.setNoise", ["on": on]) {
+            state.read(noise: noise)
+            error = nil
+            Haptics.tap()
+        } else {
+            error = "Couldn't reach the Pod."
         }
     }
 }

@@ -137,7 +137,10 @@ struct TempScreen: View {
                     case .slider:
                         TempSliderView(curve: activeCurve, profileName: activeCurve.map { profileName($0.setPoints) } ?? "")
                     case .sides:
-                        ScrollView { BothSidesView(curve: activeCurve) }
+                        ScrollView {
+                            BothSidesView(curve: activeCurve)
+                            NoiseCard().padding(.horizontal, 16).padding(.bottom, 24)
+                        }
                             .refreshable { await deviceManager.fetchStatus(); await fetchActiveCurve() }
                     }
                 } else {
@@ -210,6 +213,7 @@ struct TempScreen: View {
                             tonightCard(curve)
                         }
                     }
+                    NoiseCard()
                 }
                 .padding(.top, 24)
             }
