@@ -361,7 +361,8 @@ struct NoiseState: Equatable {
     var volume = 20
     var color = "pink"
     var fadeSeconds = 0
-    var auto = false
+    /// How it starts by itself: "off", "clock" (the curve's start time) or "smart" (when Smart start begins a curve).
+    var start = "off"
     var side = "either"
     var waitMinutes = 60
     var emptyMinutes = 10
@@ -375,7 +376,7 @@ struct NoiseState: Equatable {
         volume = (pod["noiseVolume"] as? NSNumber)?.intValue ?? volume
         color = pod["noiseColor"] as? String ?? color
         fadeSeconds = (pod["noiseFadeSeconds"] as? NSNumber)?.intValue ?? fadeSeconds
-        auto = pod["noiseAuto"] as? Bool ?? auto
+        start = pod["noiseStart"] as? String ?? start
         side = pod["noiseSide"] as? String ?? side
         waitMinutes = (pod["noiseWaitMinutes"] as? NSNumber)?.intValue ?? waitMinutes
         emptyMinutes = (pod["noiseEmptyMinutes"] as? NSNumber)?.intValue ?? emptyMinutes
@@ -412,6 +413,18 @@ struct NoiseCard: View {
     @State private var editingVolume = false
     @State private var busy = false
     @State private var error: String?
+
+    /// What the chosen way of starting does, as the web page says it.
+    private var startLine: String {
+        switch state.start {
+        case "clock":
+            return "Starts at the curve's start time, even if nobody is in bed yet. If nobody gets in within \(state.waitMinutes) minutes, it stops. If the bed has been empty long enough to stop it, it starts again when someone gets back in while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
+        case "smart":
+            return "Starts about 5 minutes after someone gets into bed, as Smart start takes over their side, even if Reading mode holds the curve until its start time. A sleeper without Smart start gets it at the curve's start time. If the bed has been empty long enough to stop it, it starts again when someone gets back in while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
+        default:
+            return "Starts only from Play or the middle button."
+        }
+    }
 
     private var status: String {
         if !state.on { return "Off" }
@@ -463,16 +476,24 @@ struct NoiseCard: View {
                 Text("Brown").tag("brown")
                 Text("White").tag("white")
             }
-            Stepper("Fades out over \(state.fadeSeconds) s", value: setting(\.fadeSeconds, "noiseFadeSeconds"), in: 0...300, step: 5)
+            Stepper("Fades in and out over \(state.fadeSeconds) s", value: setting(\.fadeSeconds, "noiseFadeSeconds"), in: 0...300, step: 5)
             Divider()
-            Toggle("Start when the curve starts", isOn: setting(\.auto, "noiseAuto"))
-            Text("Plays from the curve's bedtime until everyone is out of bed.").font(.footnote).foregroundStyle(Theme.text2)
-            Picker("Whose curve", selection: setting(\.side, "noiseSide")) {
-                Text("Whoever goes to bed first").tag("either")
-                Text(settingsManager.leftName).tag("left")
-                Text(settingsManager.rightName).tag("right")
+            Picker("Start white noise", selection: setting(\.start, "noiseStart")) {
+                Text("Off").tag("off")
+                Text("At the curve's start time").tag("clock")
+                Text("When someone gets into bed (Smart start)").tag("smart")
             }
-            Stepper("Waits for someone \(state.waitMinutes) min", value: setting(\.waitMinutes, "noiseWaitMinutes"), in: 5...240, step: 5)
+            Text(startLine).font(.footnote).foregroundStyle(Theme.text2)
+            if state.start != "off" {
+                Picker("Whose curve", selection: setting(\.side, "noiseSide")) {
+                    Text("Whoever goes to bed first").tag("either")
+                    Text(settingsManager.leftName).tag("left")
+                    Text(settingsManager.rightName).tag("right")
+                }
+            }
+            if state.start == "clock" {
+                Stepper("Waits for someone \(state.waitMinutes) min", value: setting(\.waitMinutes, "noiseWaitMinutes"), in: 5...240, step: 5)
+            }
             Stepper("Stops when all are out \(state.emptyMinutes) min", value: setting(\.emptyMinutes, "noiseEmptyMinutes"), in: 1...120)
             Stepper("Longest \(state.maxHours.formatted()) h", value: setting(\.maxHours, "noiseMaxHours"), in: 1...16, step: 0.5)
             Divider()
