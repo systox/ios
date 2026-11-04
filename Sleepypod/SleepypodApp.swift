@@ -363,6 +363,8 @@ struct NoiseState: Equatable {
     var fadeSeconds = 0
     /// How it starts by itself: "off", "clock" (the curve's start time) or "smart" (when Smart start begins a curve).
     var start = "off"
+    /// Starting with Smart start needs Detection on Live; until then it starts at the curve's start time.
+    var detectionLive = false
     var side = "either"
     var waitMinutes = 60
     var emptyMinutes = 10
@@ -377,6 +379,7 @@ struct NoiseState: Equatable {
         color = pod["noiseColor"] as? String ?? color
         fadeSeconds = (pod["noiseFadeSeconds"] as? NSNumber)?.intValue ?? fadeSeconds
         start = pod["noiseStart"] as? String ?? start
+        if let detection = pod["detection"] as? String { detectionLive = detection == "live" }
         side = pod["noiseSide"] as? String ?? side
         waitMinutes = (pod["noiseWaitMinutes"] as? NSNumber)?.intValue ?? waitMinutes
         emptyMinutes = (pod["noiseEmptyMinutes"] as? NSNumber)?.intValue ?? emptyMinutes
@@ -418,9 +421,11 @@ struct NoiseCard: View {
     private var startLine: String {
         switch state.start {
         case "clock":
-            return "Starts at the curve's start time, even if nobody is in bed yet. If nobody gets in within \(state.waitMinutes) minutes, it stops. If the bed has been empty long enough to stop it, it starts again when someone gets back in while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
+            return "Starts at the curve's start time, even if nobody is in bed yet. If the bed has been empty long enough to stop it, it starts again when a sleeper gets back into their side while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
+        case "smart" where !state.detectionLive:
+            return "Starts at the curve's start time for now: starting when someone gets into bed needs Detection set to Live in Tonight settings. If the bed has been empty long enough to stop it, it starts again when a sleeper gets back into their side while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
         case "smart":
-            return "Starts about 5 minutes after someone gets into bed, as Smart start takes over their side, even if Reading mode holds the curve until its start time. A sleeper without Smart start gets it at the curve's start time. If the bed has been empty long enough to stop it, it starts again when someone gets back in while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
+            return "Starts as Smart start begins someone's curve, a few minutes after they get into bed, even if Reading mode holds the curve until its start time. A sleeper without Smart start gets it at the curve's start time. If the bed has been empty long enough to stop it, it starts again when a sleeper gets back into their side while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
         default:
             return "Starts only from Play or the middle button."
         }
@@ -491,9 +496,8 @@ struct NoiseCard: View {
                     Text(settingsManager.rightName).tag("right")
                 }
             }
-            if state.start == "clock" {
-                Stepper("Waits for someone \(state.waitMinutes) min", value: setting(\.waitMinutes, "noiseWaitMinutes"), in: 5...240, step: 5)
-            }
+            Stepper("Waits for someone \(state.waitMinutes) min", value: setting(\.waitMinutes, "noiseWaitMinutes"), in: 5...240, step: 5)
+            Text("For noise that starts with nobody in bed, at the curve's start time or from Play or the middle button. After that, it stops once the bed has been empty for the time below.").font(.footnote).foregroundStyle(Theme.text2)
             Stepper("Stops when all are out \(state.emptyMinutes) min", value: setting(\.emptyMinutes, "noiseEmptyMinutes"), in: 1...120)
             Stepper("Longest \(state.maxHours.formatted()) h", value: setting(\.maxHours, "noiseMaxHours"), in: 1...16, step: 0.5)
             Divider()
