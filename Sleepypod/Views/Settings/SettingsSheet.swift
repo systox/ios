@@ -36,9 +36,6 @@ struct SettingsSheet: View {
                     .padding(.horizontal, 4)
                     HStack(spacing: 10) {
                         quick("Link sides", icon: "link", active: device.isLinked) { device.toggleLink() }
-                        quick("Away", icon: "airplane", active: away) {
-                            Task { await settings.toggleAwayMode(device.selectedSide.primarySide) }
-                        }
                         quick("Prime", icon: "drop", active: device.deviceStatus?.isPriming == true) { confirmPrime = true }
                     }
                     GroupedCard(glass: true) {
@@ -108,10 +105,6 @@ struct SettingsSheet: View {
                     }
             }
         }
-    }
-
-    private var away: Bool {
-        device.selectedSide.primarySide == .left ? settings.settings?.left.awayMode ?? false : settings.settings?.right.awayMode ?? false
     }
 
     private func quick(_ title: String, icon: String, active: Bool, action: @escaping () -> Void) -> some View {

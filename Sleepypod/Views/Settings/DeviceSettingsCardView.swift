@@ -210,7 +210,6 @@ struct SidesCardView: View {
                     label: "Left Side",
                     name: settings.left.name,
                     placeholder: "Left",
-                    awayMode: settings.left.awayMode,
                     side: .left
                 )
 
@@ -222,7 +221,6 @@ struct SidesCardView: View {
                     label: "Right Side",
                     name: settings.right.name,
                     placeholder: "Right",
-                    awayMode: settings.right.awayMode,
                     side: .right
                 )
             }
@@ -230,7 +228,7 @@ struct SidesCardView: View {
         .cardStyle()
     }
 
-    private func sideRow(badge: String, label: String, name: String, placeholder: String, awayMode: Bool, side: Side) -> some View {
+    private func sideRow(badge: String, label: String, name: String, placeholder: String, side: Side) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Text(badge)
@@ -253,22 +251,6 @@ struct SidesCardView: View {
                     }
                 }
                 Spacer()
-            }
-
-            HStack {
-                Text("Away Mode")
-                    .font(.subheadline)
-                    .foregroundColor(Theme.text1)
-                Spacer()
-                Toggle("", isOn: Binding(
-                    get: { awayMode },
-                    set: { _ in
-                        Haptics.medium()
-                        Task { await settingsManager.toggleAwayMode(side) }
-                    }
-                ))
-                .tint(Theme.cooling)
-                .labelsHidden()
             }
         }
     }
