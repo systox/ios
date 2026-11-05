@@ -361,10 +361,12 @@ struct NoiseState: Equatable {
     var volume = 20
     var color = "pink"
     var fadeSeconds = 0
-    /// How it starts by itself: "off", "clock" (the curve's start time) or "smart" (when Smart start begins a curve).
+    /// The trigger: "off" (Manual), "clock" (Scheduled: during bed hours) or "smart" (on getting into bed).
     var start = "off"
-    /// Starting with Smart start needs Detection on Live; until then it starts at the curve's start time.
+    /// The Smart trigger needs Detection on Live.
     var detectionLive = false
+    /// Each side's Smart start minutes, which the Smart trigger waits too.
+    var startMinutes: [String: Int] = [:]
     var side = "either"
     var waitMinutes = 60
     var emptyMinutes = 10
@@ -385,6 +387,20 @@ struct NoiseState: Equatable {
         emptyMinutes = (pod["noiseEmptyMinutes"] as? NSNumber)?.intValue ?? emptyMinutes
         maxHours = (pod["noiseMaxHours"] as? NSNumber)?.doubleValue ?? maxHours
         for key in Self.middleKeys { middle[key] = pod[key] as? String ?? middle[key] }
+    }
+
+    mutating func read(sides overview: [String: Any]) {
+        for side in ["left", "right"] {
+            let settings = (overview[side] as? [String: Any])?["settings"] as? [String: Any]
+            if let minutes = (settings?["minutesToCall"] as? NSNumber)?.intValue { startMinutes[side] = minutes }
+        }
+    }
+
+    /// The Smart start minutes of the sleepers whose bedtimes count, as one number or a range.
+    var minutesToStart: String {
+        let values = (side == "either" ? ["left", "right"] : [side]).compactMap { startMinutes[$0] }
+        guard let low = values.min(), let high = values.max() else { return "a few" }
+        return low == high ? "\(low)" : "\(low) to \(high)"
     }
 
     mutating func read(noise: [String: Any]) {
@@ -417,17 +433,16 @@ struct NoiseCard: View {
     @State private var busy = false
     @State private var error: String?
 
-    /// What the chosen way of starting does, as the web page says it.
-    private var startLine: String {
+    /// What the trigger does, as the web page says it. Manual needs no words.
+    private var triggerLine: String? {
         switch state.start {
         case "clock":
-            return "Starts at the curve's start time, even if nobody is in bed yet. If the bed has been empty long enough to stop it, it starts again when a sleeper gets back into their side while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
-        case "smart" where !state.detectionLive:
-            return "Starts at the curve's start time for now: starting when someone gets into bed needs Detection set to Live in Tonight settings. If the bed has been empty long enough to stop it, it starts again when a sleeper gets back into their side while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
+            return "Runs during bed hours."
         case "smart":
-            return "Starts as Smart start begins someone's curve, a few minutes after they get into bed, even if Reading mode holds the curve until its start time. A sleeper without Smart start gets it at the curve's start time. If the bed has been empty long enough to stop it, it starts again when a sleeper gets back into their side while their curve runs, unless someone stopped it by hand that night. Anyone away is left out."
+            let live = state.detectionLive ? "" : " Needs Detection set to Live in Tonight settings."
+            return "Starts \(state.minutesToStart) minutes after you get into bed. Pauses and resumes with presence detection. Maximum \(state.maxHours.formatted()) hours.\(live)"
         default:
-            return "Starts only from Play or the middle button."
+            return nil
         }
     }
 
@@ -483,12 +498,12 @@ struct NoiseCard: View {
             }
             Stepper("Fades in and out over \(state.fadeSeconds) s", value: setting(\.fadeSeconds, "noiseFadeSeconds"), in: 0...300, step: 5)
             Divider()
-            Picker("Start white noise", selection: setting(\.start, "noiseStart")) {
-                Text("Off").tag("off")
-                Text("At the curve's start time").tag("clock")
-                Text("When someone gets into bed (Smart start)").tag("smart")
+            Picker("Trigger", selection: setting(\.start, "noiseStart")) {
+                Text("Manual").tag("off")
+                Text("Scheduled").tag("clock")
+                Text("Smart").tag("smart")
             }
-            Text(startLine).font(.footnote).foregroundStyle(Theme.text2)
+            if let triggerLine { Text(triggerLine).font(.footnote).foregroundStyle(Theme.text2) }
             if state.start != "off" {
                 Picker("Whose curve", selection: setting(\.side, "noiseSide")) {
                     Text("Whoever goes to bed first").tag("either")
@@ -497,7 +512,7 @@ struct NoiseCard: View {
                 }
             }
             Stepper("Waits for someone \(state.waitMinutes) min", value: setting(\.waitMinutes, "noiseWaitMinutes"), in: 5...240, step: 5)
-            Text("For noise that starts with nobody in bed, at the curve's start time or from Play or the middle button. After that, it stops once the bed has been empty for the time below.").font(.footnote).foregroundStyle(Theme.text2)
+            Text("When started by hand with nobody in bed.").font(.footnote).foregroundStyle(Theme.text2)
             Stepper("Stops when all are out \(state.emptyMinutes) min", value: setting(\.emptyMinutes, "noiseEmptyMinutes"), in: 1...120)
             Stepper("Longest \(state.maxHours.formatted()) h", value: setting(\.maxHours, "noiseMaxHours"), in: 1...16, step: 0.5)
             Divider()
@@ -558,6 +573,7 @@ struct NoiseCard: View {
               let noise = overview["noise"] as? [String: Any] else { return }
         state.read(pod: pod)
         state.read(noise: noise)
+        state.read(sides: overview)
         if !editingVolume { volume = Double(state.volume) }
         loaded = true
     }
