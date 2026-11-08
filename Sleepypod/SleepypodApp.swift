@@ -283,7 +283,7 @@ struct PodWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.addUserScript(Self.hideWebTabBar)
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = FullPageWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
         view.load(URLRequest(url: url))
         return view
@@ -292,6 +292,30 @@ struct PodWebView: UIViewRepresentable {
     func updateUIView(_ view: WKWebView, context: Context) {
         // A new Pod address loads the page again; anything else keeps where the person is.
         if view.url?.host != url.host { view.load(URLRequest(url: url)) }
+    }
+}
+
+/// A Pod page that also offers the whole scrolling page, as a PDF, under
+/// Full Page in the screenshot editor, as Safari does. Choosing it is up to the person.
+final class FullPageWebView: WKWebView, UIScreenshotServiceDelegate {
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        // The page on screen answers; a tab out of view has no window and offers nothing.
+        if let service = window?.windowScene?.screenshotService { service.delegate = self }
+    }
+
+    func screenshotService(
+        _ screenshotService: UIScreenshotService,
+        generatePDFRepresentationWithCompletion completionHandler: @escaping (Data?, Int, CGRect) -> Void
+    ) {
+        guard window != nil else { return completionHandler(nil, 0, .zero) }
+        // Where the screen sits in the page, so the editor opens there. A PDF counts up from the bottom.
+        let page = scrollView.contentSize.height
+        let top = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+        let shown = CGRect(x: 0, y: max(0, page - top - bounds.height), width: bounds.width, height: bounds.height)
+        createPDF(configuration: WKPDFConfiguration()) { result in
+            completionHandler(try? result.get(), 0, shown)
+        }
     }
 }
 
