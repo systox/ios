@@ -318,8 +318,10 @@ final class FullPageWebView: WKWebView, UIScreenshotServiceDelegate {
 }
 
 /// "IN BED" or "NOT IN BED" as the Pod's presence detector has it: the one Smart start
-/// and white noise act on, so the label says what the Pod believes. Until the Pod answers,
-/// or on a Pod without the fork, it falls back to the live stream's guess.
+/// and white noise act on, so the label says what the Pod believes. "AWAY" only when the
+/// sleeper is set Away. When the Pod can't say (its readings have stopped, or it can't be
+/// reached) the label shows the side alone rather than a guess. Demo mode, which has no
+/// Pod, uses the demo stream's.
 struct InBedLabel: View {
     @Environment(SettingsManager.self) private var settingsManager
     @Environment(\.scenePhase) private var scenePhase
@@ -328,10 +330,22 @@ struct InBedLabel: View {
     let sides: [Side]
     let streamGuess: Bool
 
+    private func isAway(_ side: Side) -> Bool {
+        guard let settings = settingsManager.settings else { return false }
+        return side == .left ? settings.left.awayMode : settings.right.awayMode
+    }
+
+    private var state: PodPresence.State? {
+        let home = sides.filter { !isAway($0) }
+        if home.isEmpty { return .away }
+        if APIBackend.current.isDemo { return streamGuess ? .inBed : .notInBed }
+        return presence.state(home)
+    }
+
     var body: some View {
-        let inBed = presence.inBed(sides) ?? streamGuess
-        if inBed { StatusDot() }
-        Eyebrow("\(place) · \(inBed ? "IN BED" : "NOT IN BED")")
+        let current = state
+        if current == .inBed { StatusDot() }
+        Eyebrow(current.map { "\(place) · \($0.rawValue)" } ?? place)
             .task(id: scenePhase) {
                 while !Task.isCancelled && scenePhase == .active {
                     await presence.refresh(podIP: settingsManager.podIP)
@@ -344,15 +358,22 @@ struct InBedLabel: View {
 /// Each side's in-bed state from the Pod's `fork.overview`, shared by every label.
 @MainActor @Observable
 final class PodPresence {
+    enum State: String {
+        case inBed = "IN BED"
+        case notInBed = "NOT IN BED"
+        case away = "AWAY"
+    }
+
     static let shared = PodPresence()
-    private var occupied: [Side: Bool] = [:]
+    private var states: [Side: State] = [:]
     @ObservationIgnored private var lastAsked = Date.distantPast
     @ObservationIgnored private var failures = 0
 
     /// In bed when any of the sides is; nil while any of them is unknown.
-    func inBed(_ sides: [Side]) -> Bool? {
-        let known = sides.compactMap { occupied[$0] }
-        return known.count == sides.count ? known.contains(true) : nil
+    func state(_ sides: [Side]) -> State? {
+        let known = sides.compactMap { states[$0] }
+        guard !known.isEmpty, known.count == sides.count else { return nil }
+        return known.contains(.inBed) ? .inBed : .notInBed
     }
 
     /// Asks the Pod at most every 15 seconds, however many labels are on screen.
@@ -361,25 +382,22 @@ final class PodPresence {
         guard Date().timeIntervalSince(lastAsked) >= 15 else { return }
         lastAsked = Date()
         guard let overview = await fetch(podIP: podIP) else {
-            // One dropped request keeps the last answer; a Pod that stays silent leaves it to the guess.
+            // One dropped request keeps the last answer; a Pod that stays silent is unknown.
             failures += 1
-            if failures >= 2 { occupied = [:] }
+            if failures >= 2 { states = [:] }
             return
         }
         failures = 0
         // Readings that have stopped leave presence frozen at its last call, so they count as unknown.
-        guard (overview["health"] as? [String: Any])?["sensorsFresh"] as? Bool == true else {
-            occupied = [:]
-            return
-        }
-        var next: [Side: Bool] = [:]
+        let fresh = (overview["health"] as? [String: Any])?["sensorsFresh"] as? Bool == true
+        var next: [Side: State] = [:]
         for side in Side.allCases {
             let view = overview[side.rawValue] as? [String: Any]
             // The whole bed as Smart start counts it (either half on one big side); older Pods send only the side's own.
             let presence = (view?["bedPresence"] ?? view?["presence"]) as? [String: Any]
-            if let value = presence?["occupied"] as? Bool { next[side] = value }
+            if fresh, let occupied = presence?["occupied"] as? Bool { next[side] = occupied ? .inBed : .notInBed }
         }
-        occupied = next
+        states = next
     }
 
     private func fetch(podIP: String) async -> [String: Any]? {
@@ -396,34 +414,35 @@ final class PodPresence {
 /// for the base and the white noise its speaker plays. Drawn once as a template image.
 enum BaseTabIcon {
     @MainActor static let image: UIImage = {
-        let renderer = ImageRenderer(content: Glyph().frame(width: 46, height: 22))
+        // 31 points wide: the widest a tab bar glyph is meant to be, beside 25-point symbols.
+        let renderer = ImageRenderer(content: Glyph().frame(width: 31, height: 18))
         renderer.scale = 3
         return (renderer.uiImage ?? UIImage(systemName: "bed.double") ?? UIImage()).withRenderingMode(.alwaysTemplate)
     }()
 
     private struct Glyph: View {
         var body: some View {
-            Lines().stroke(.black, style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
+            Lines().stroke(.black, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
         }
     }
 
-    /// In a 46 by 22 box: the base's deck and frame, the slash, then the speaker and its two waves.
+    /// In a 31 by 18 box: the base's deck and frame, the slash, then the speaker and its two waves.
     private struct Lines: Shape {
         func path(in rect: CGRect) -> Path {
-            let sx = rect.width / 46, sy = rect.height / 22
+            let sx = rect.width / 31, sy = rect.height / 18
             func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: rect.minX + x * sx, y: rect.minY + y * sy) }
             var path = Path()
-            path.addLines([p(2, 5), p(8, 13), p(16, 13), p(19, 11), p(22, 13)])
-            path.addLines([p(3, 16), p(22, 16)])
-            path.addLines([p(6, 16), p(6, 19)])
-            path.addLines([p(19, 16), p(19, 19)])
-            path.addLines([p(26, 19), p(30, 3)])
-            path.addLines([p(34, 9), p(36.5, 9), p(40, 6), p(40, 16), p(36.5, 13), p(34, 13)])
+            path.addLines([p(1, 4), p(5, 10), p(11, 10), p(13, 8.7), p(15, 10)])
+            path.addLines([p(2, 12.5), p(15, 12.5)])
+            path.addLines([p(4, 12.5), p(4, 15)])
+            path.addLines([p(13.5, 12.5), p(13.5, 15)])
+            path.addLines([p(17.5, 16), p(20, 3)])
+            path.addLines([p(22, 8), p(23.6, 8), p(26, 6), p(26, 13), p(23.6, 11), p(22, 11)])
             path.closeSubpath()
-            path.move(to: p(42.2, 8.5))
-            path.addQuadCurve(to: p(42.2, 13.5), control: p(43.7, 11))
-            path.move(to: p(44, 6.8))
-            path.addQuadCurve(to: p(44, 15.2), control: p(46.6, 11))
+            path.move(to: p(27.5, 7.8))
+            path.addQuadCurve(to: p(27.5, 11.2), control: p(28.6, 9.5))
+            path.move(to: p(29.2, 6.4))
+            path.addQuadCurve(to: p(29.2, 12.6), control: p(30.8, 9.5))
             return path
         }
     }

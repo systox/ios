@@ -45,19 +45,6 @@ final class MarketingTour: XCTestCase {
         end()
     }
 
-    func testClipSchedule() throws {
-        launch(control: "dial", route: "schedule")
-        XCTAssertTrue(app.staticTexts["Schedule active"].waitForExistence(timeout: 15))
-        begin()
-        pause(1.5)
-        tap(button(prefix: "Tue"), hold: 1.2)
-        tap(button(containing: "Deep"), hold: 1.4)
-        tap(app.buttons["Cooler"], hold: 0.5)
-        tap(app.buttons["Cooler"], hold: 0.5)
-        tap(app.buttons["Cooler"], hold: 1.2)
-        tap(app.buttons["Save"], hold: 3.0)
-        end()
-    }
 
     func testClipSleepAndWatch() throws {
         launch(control: "dial", route: "sleep")
