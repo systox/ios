@@ -95,7 +95,7 @@ struct ContentView: View {
 
     private static var initialTab: String {
         switch DebugRoute.current {
-        case "schedule": "schedule"
+        case "schedule": "podschedule"
         case "sleep", "week", "weektrend", "month", "watch", "stages": "sleep"
         default: "temp"
         }
@@ -132,14 +132,12 @@ struct ContentView: View {
                     if isConnected { PodPageTab(path: "/en/tonight") }
                     else { NavigationStack { DisconnectedTabView(tab: "Tonight", selectedTab: $selectedTab).settingsToolbar() } }
                 } label: { tabLabel("Tonight", "bed.double") }
-                // The app's own schedule screen, kept until the web one above has replaced all of it.
-                Tab(value: "schedule") {
-                    if isConnected {
-                        ScheduleScreen()
-                    } else {
-                        NavigationStack { DisconnectedTabView(tab: "Classic", selectedTab: $selectedTab).settingsToolbar() }
-                    }
-                } label: { tabLabel("Classic", "calendar.badge.clock") }
+                // The Pod's Base page: the base's position and the white noise its speaker plays.
+                // It took the place of the app's own schedule screen ("Classic"); the Pod's Schedule tab replaced that.
+                Tab(value: "base") {
+                    if isConnected { PodPageTab(path: "/en/base") }
+                    else { NavigationStack { DisconnectedTabView(tab: "Base", selectedTab: $selectedTab).settingsToolbar() } }
+                } label: { Label { Text("Base") } icon: { Image(uiImage: BaseTabIcon.image) } }
             }
             .tabBarMinimizeBehavior(.onScrollDown)
             .onChange(of: selectedTab) {
@@ -319,309 +317,114 @@ final class FullPageWebView: WKWebView, UIScreenshotServiceDelegate {
     }
 }
 
-/// White noise on or off from the Temp screen's toolbar. Its settings are in the card at the bottom of the screen.
-struct NoiseButton: View {
+/// "IN BED" or "NOT IN BED" as the Pod's presence detector has it: the one Smart start
+/// and white noise act on, so the label says what the Pod believes. Until the Pod answers,
+/// or on a Pod without the fork, it falls back to the live stream's guess.
+struct InBedLabel: View {
     @Environment(SettingsManager.self) private var settingsManager
     @Environment(\.scenePhase) private var scenePhase
-    @State private var on = false
-    @State private var busy = false
+    @State private var presence = PodPresence.shared
+    let place: String
+    let sides: [Side]
+    let streamGuess: Bool
 
     var body: some View {
-        Button(on ? "Stop white noise" : "Play white noise", systemImage: on ? "speaker.wave.2.fill" : "speaker.slash") {
-            Task { await toggle() }
-        }
-        .tint(on ? Theme.text1 : Theme.text2)
-        .disabled(busy)
-        .task(id: scenePhase) {
-            // Noise can stop by itself or from the cover, so the button keeps checking while it's on screen.
-            while !Task.isCancelled && scenePhase == .active {
-                await refresh()
-                try? await Task.sleep(for: .seconds(30))
+        let inBed = presence.inBed(sides) ?? streamGuess
+        if inBed { StatusDot() }
+        Eyebrow("\(place) · \(inBed ? "IN BED" : "NOT IN BED")")
+            .task(id: scenePhase) {
+                while !Task.isCancelled && scenePhase == .active {
+                    await presence.refresh(podIP: settingsManager.podIP)
+                    try? await Task.sleep(for: .seconds(20))
+                }
             }
+    }
+}
+
+/// Each side's in-bed state from the Pod's `fork.overview`, shared by every label.
+@MainActor @Observable
+final class PodPresence {
+    static let shared = PodPresence()
+    private var occupied: [Side: Bool] = [:]
+    @ObservationIgnored private var lastAsked = Date.distantPast
+    @ObservationIgnored private var failures = 0
+
+    /// In bed when any of the sides is; nil while any of them is unknown.
+    func inBed(_ sides: [Side]) -> Bool? {
+        let known = sides.compactMap { occupied[$0] }
+        return known.count == sides.count ? known.contains(true) : nil
+    }
+
+    /// Asks the Pod at most every 15 seconds, however many labels are on screen.
+    func refresh(podIP: String) async {
+        guard !APIBackend.current.isDemo else { return }
+        guard Date().timeIntervalSince(lastAsked) >= 15 else { return }
+        lastAsked = Date()
+        guard let overview = await fetch(podIP: podIP) else {
+            // One dropped request keeps the last answer; a Pod that stays silent leaves it to the guess.
+            failures += 1
+            if failures >= 2 { occupied = [:] }
+            return
         }
+        failures = 0
+        // Readings that have stopped leave presence frozen at its last call, so they count as unknown.
+        guard (overview["health"] as? [String: Any])?["sensorsFresh"] as? Bool == true else {
+            occupied = [:]
+            return
+        }
+        var next: [Side: Bool] = [:]
+        for side in Side.allCases {
+            let view = overview[side.rawValue] as? [String: Any]
+            // The whole bed as Smart start counts it (either half on one big side); older Pods send only the side's own.
+            let presence = (view?["bedPresence"] ?? view?["presence"]) as? [String: Any]
+            if let value = presence?["occupied"] as? Bool { next[side] = value }
+        }
+        occupied = next
     }
 
-    private func endpoint(_ procedure: String, query: String = "") -> URL? {
-        URL(string: "http://\(settingsManager.podIP):3000/api/trpc/\(procedure)\(query)")
-    }
-
-    private func read(_ data: Data) -> Bool? {
-        guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = body["result"] as? [String: Any],
-              let payload = result["data"] as? [String: Any],
-              let json = payload["json"] as? [String: Any] else { return nil }
-        return json["on"] as? Bool
-    }
-
-    private func refresh() async {
-        guard let url = endpoint("fork.noiseStatus", query: "?input=%7B%22json%22%3A%7B%7D%7D"),
+    private func fetch(podIP: String) async -> [String: Any]? {
+        guard let url = URL(string: "http://\(podIP):3000/api/trpc/fork.overview?input=%7B%22json%22%3A%7B%7D%7D"),
               let response = try? await URLSession.shared.data(from: url),
-              let state = read(response.0) else { return }
-        on = state
-    }
-
-    private func toggle() async {
-        guard let url = endpoint("fork.setNoise") else { return }
-        busy = true
-        defer { busy = false }
-        // Act on what the Pod says now, not on what this button last saw.
-        await refresh()
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["json": ["on": !on]])
-        if let response = try? await URLSession.shared.data(for: request), let state = read(response.0) {
-            on = state
-            Haptics.tap()
-        }
-    }
-}
-
-/// What the Pod says about white noise: whether it plays, and every setting for it.
-struct NoiseState: Equatable {
-    var on = false
-    var playing = false
-    var problem: String?
-    var volume = 20
-    var color = "pink"
-    var fadeSeconds = 0
-    /// The trigger: "off" (Manual), "clock" (Scheduled: during bed hours) or "smart" (on getting into bed).
-    var start = "off"
-    /// The Smart trigger needs Detection on Live.
-    var detectionLive = false
-    /// Each side's Smart start minutes, which the Smart trigger waits too.
-    var startMinutes: [String: Int] = [:]
-    var side = "either"
-    var waitMinutes = 60
-    var emptyMinutes = 10
-    var maxHours = 12.0
-    var middle: [String: String] = [:]
-
-    /// The middle-button gestures a person can actually make, in the order shown.
-    static let middleKeys = ["middleSingle", "middleDouble", "middleTriple"]
-
-    mutating func read(pod: [String: Any]) {
-        volume = (pod["noiseVolume"] as? NSNumber)?.intValue ?? volume
-        color = pod["noiseColor"] as? String ?? color
-        fadeSeconds = (pod["noiseFadeSeconds"] as? NSNumber)?.intValue ?? fadeSeconds
-        start = pod["noiseStart"] as? String ?? start
-        if let detection = pod["detection"] as? String { detectionLive = detection == "live" }
-        side = pod["noiseSide"] as? String ?? side
-        waitMinutes = (pod["noiseWaitMinutes"] as? NSNumber)?.intValue ?? waitMinutes
-        emptyMinutes = (pod["noiseEmptyMinutes"] as? NSNumber)?.intValue ?? emptyMinutes
-        maxHours = (pod["noiseMaxHours"] as? NSNumber)?.doubleValue ?? maxHours
-        for key in Self.middleKeys { middle[key] = pod[key] as? String ?? middle[key] }
-    }
-
-    mutating func read(sides overview: [String: Any]) {
-        for side in ["left", "right"] {
-            let settings = (overview[side] as? [String: Any])?["settings"] as? [String: Any]
-            if let minutes = (settings?["minutesToCall"] as? NSNumber)?.intValue { startMinutes[side] = minutes }
-        }
-    }
-
-    /// The Smart start minutes of the sleepers whose bedtimes count, as one number or a range.
-    var minutesToStart: String {
-        let values = (side == "either" ? ["left", "right"] : [side]).compactMap { startMinutes[$0] }
-        guard let low = values.min(), let high = values.max() else { return "a few" }
-        return low == high ? "\(low)" : "\(low) to \(high)"
-    }
-
-    mutating func read(noise: [String: Any]) {
-        on = noise["on"] as? Bool ?? on
-        playing = noise["playing"] as? Bool ?? playing
-        problem = noise["problem"] as? String
-    }
-}
-
-/// White noise with all its settings, at the bottom of the Temp screen.
-struct NoiseCard: View {
-    struct Gesture: Identifiable {
-        let key: String
-        let label: String
-        var id: String { key }
-    }
-
-    static let gestures = [
-        Gesture(key: "middleSingle", label: "One press"),
-        Gesture(key: "middleDouble", label: "Two presses"),
-        Gesture(key: "middleTriple", label: "Three presses"),
-    ]
-
-    @Environment(SettingsManager.self) private var settingsManager
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var state = NoiseState()
-    @State private var loaded = false
-    @State private var volume = 20.0
-    @State private var editingVolume = false
-    @State private var busy = false
-    @State private var error: String?
-
-    /// What the trigger does, as the web page says it. Manual needs no words.
-    private var triggerLine: String? {
-        switch state.start {
-        case "clock":
-            return "Runs during bed hours."
-        case "smart":
-            let live = state.detectionLive ? "" : " Needs Detection set to Live in Tonight settings."
-            return "Starts \(state.minutesToStart) minutes after you get into bed. Pauses and resumes with presence detection. Maximum \(state.maxHours.formatted()) hours.\(live)"
-        default:
-            return nil
-        }
-    }
-
-    private var status: String {
-        if !state.on { return "Off" }
-        if state.volume == 0 { return "On but silent" }
-        return state.playing ? "Playing" : "Starting"
-    }
-
-    var body: some View {
-        // A stack, not a Group: a Group with nothing in it yet has nothing to run the task on.
-        VStack(spacing: 0) {
-            if loaded { content.cardStyle() }
-        }
-        .task(id: scenePhase) {
-            // Noise can stop by itself or from the cover, so the card keeps checking while it's on screen.
-            while !Task.isCancelled && scenePhase == .active {
-                await refresh()
-                try? await Task.sleep(for: .seconds(30))
-            }
-        }
-    }
-
-    private var content: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Eyebrow("WHITE NOISE")
-                Spacer(minLength: 8)
-                Text(status).font(.mono(12, relativeTo: .caption)).foregroundStyle(Theme.text2)
-            }
-            if state.on, !state.playing, let problem = state.problem {
-                Text("White noise isn't playing. \(problem)").font(.footnote).foregroundStyle(Theme.amber)
-            }
-            Button(state.on ? "Stop" : "Play", systemImage: state.on ? "stop.fill" : "play.fill") {
-                Task { await setNoise(!state.on) }
-            }
-            .buttonStyle(.bordered)
-            .disabled(busy)
-            HStack(spacing: 10) {
-                Text("Volume")
-                Slider(value: $volume, in: 0...100, step: 5, onEditingChanged: { editing in
-                    editingVolume = editing
-                    if !editing { Task { await save(["noiseVolume": Int(volume)]) } }
-                })
-                .accessibilityLabel("White noise volume")
-                Text("\(Int(volume))").font(.mono(12, relativeTo: .caption)).foregroundStyle(Theme.text2)
-                    .frame(minWidth: 28, alignment: .trailing)
-            }
-            Picker("Sound", selection: setting(\.color, "noiseColor")) {
-                Text("Pink").tag("pink")
-                Text("Brown").tag("brown")
-                Text("White").tag("white")
-            }
-            Stepper("Fades in and out over \(state.fadeSeconds) s", value: setting(\.fadeSeconds, "noiseFadeSeconds"), in: 0...300, step: 5)
-            Divider()
-            Picker("Trigger", selection: setting(\.start, "noiseStart")) {
-                Text("Manual").tag("off")
-                Text("Scheduled").tag("clock")
-                Text("Smart").tag("smart")
-            }
-            if let triggerLine { Text(triggerLine).font(.footnote).foregroundStyle(Theme.text2) }
-            if state.start != "off" {
-                Picker("Whose curve", selection: setting(\.side, "noiseSide")) {
-                    Text("Whoever goes to bed first").tag("either")
-                    Text(settingsManager.leftName).tag("left")
-                    Text(settingsManager.rightName).tag("right")
-                }
-            }
-            Stepper("Waits for someone \(state.waitMinutes) min", value: setting(\.waitMinutes, "noiseWaitMinutes"), in: 5...240, step: 5)
-            Text("When started by hand with nobody in bed.").font(.footnote).foregroundStyle(Theme.text2)
-            Stepper("Stops when all are out \(state.emptyMinutes) min", value: setting(\.emptyMinutes, "noiseEmptyMinutes"), in: 1...120)
-            Stepper("Longest \(state.maxHours.formatted()) h", value: setting(\.maxHours, "noiseMaxHours"), in: 1...16, step: 0.5)
-            Divider()
-            Eyebrow("MIDDLE BUTTON")
-            ForEach(Self.gestures) { gesture in
-                Picker(gesture.label, selection: middle(gesture.key)) {
-                    Text("Nothing").tag("none")
-                    Text("White noise on or off").tag("noise")
-                }
-            }
-            if let error { Text(error).font(.footnote).foregroundStyle(Theme.amber) }
-        }
-        .font(.subheadline)
-        .tint(Theme.text1)
-    }
-
-    /// A setting that saves to the Pod as soon as it changes.
-    private func setting<Value: Sendable>(_ path: WritableKeyPath<NoiseState, Value> & Sendable, _ key: String) -> Binding<Value> {
-        Binding(get: { state[keyPath: path] }, set: { value in
-            state[keyPath: path] = value
-            Task { await save([key: value]) }
-        })
-    }
-
-    private func middle(_ key: String) -> Binding<String> {
-        Binding(get: { state.middle[key] ?? "none" }, set: { value in
-            state.middle[key] = value
-            Task { await save([key: value]) }
-        })
-    }
-
-    private func endpoint(_ procedure: String, query: String = "") -> URL? {
-        URL(string: "http://\(settingsManager.podIP):3000/api/trpc/\(procedure)\(query)")
-    }
-
-    private func json(_ data: Data) -> [String: Any]? {
-        guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let body = try? JSONSerialization.jsonObject(with: response.0) as? [String: Any],
               let result = body["result"] as? [String: Any],
               let payload = result["data"] as? [String: Any] else { return nil }
         return payload["json"] as? [String: Any]
     }
+}
 
-    private func post(_ procedure: String, _ input: [String: Any]) async -> [String: Any]? {
-        guard let url = endpoint(procedure) else { return nil }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["json": input])
-        guard let response = try? await URLSession.shared.data(for: request) else { return nil }
-        return json(response.0)
-    }
+/// The Base tab's icon: an adjustable base with its head raised, a slash, and a speaker,
+/// for the base and the white noise its speaker plays. Drawn once as a template image.
+enum BaseTabIcon {
+    @MainActor static let image: UIImage = {
+        let renderer = ImageRenderer(content: Glyph().frame(width: 46, height: 22))
+        renderer.scale = 3
+        return (renderer.uiImage ?? UIImage(systemName: "bed.double") ?? UIImage()).withRenderingMode(.alwaysTemplate)
+    }()
 
-    private func refresh() async {
-        guard let url = endpoint("fork.overview", query: "?input=%7B%22json%22%3A%7B%7D%7D"),
-              let response = try? await URLSession.shared.data(from: url),
-              let overview = json(response.0),
-              let pod = overview["pod"] as? [String: Any],
-              let noise = overview["noise"] as? [String: Any] else { return }
-        state.read(pod: pod)
-        state.read(noise: noise)
-        state.read(sides: overview)
-        if !editingVolume { volume = Double(state.volume) }
-        loaded = true
-    }
-
-    private func save(_ patch: [String: Any]) async {
-        if let saved = await post("fork.setPodSettings", ["patch": patch]) {
-            state.read(pod: saved)
-            error = nil
-        } else {
-            error = "Not saved. Check the Pod is reachable."
-            await refresh()
+    private struct Glyph: View {
+        var body: some View {
+            Lines().stroke(.black, style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
         }
-        if !editingVolume { volume = Double(state.volume) }
     }
 
-    private func setNoise(_ on: Bool) async {
-        busy = true
-        defer { busy = false }
-        if let noise = await post("fork.setNoise", ["on": on]) {
-            state.read(noise: noise)
-            error = nil
-            Haptics.tap()
-        } else {
-            error = "Couldn't reach the Pod."
+    /// In a 46 by 22 box: the base's deck and frame, the slash, then the speaker and its two waves.
+    private struct Lines: Shape {
+        func path(in rect: CGRect) -> Path {
+            let sx = rect.width / 46, sy = rect.height / 22
+            func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: rect.minX + x * sx, y: rect.minY + y * sy) }
+            var path = Path()
+            path.addLines([p(2, 5), p(8, 13), p(16, 13), p(19, 11), p(22, 13)])
+            path.addLines([p(3, 16), p(22, 16)])
+            path.addLines([p(6, 16), p(6, 19)])
+            path.addLines([p(19, 16), p(19, 19)])
+            path.addLines([p(26, 19), p(30, 3)])
+            path.addLines([p(34, 9), p(36.5, 9), p(40, 6), p(40, 16), p(36.5, 13), p(34, 13)])
+            path.closeSubpath()
+            path.move(to: p(42.2, 8.5))
+            path.addQuadCurve(to: p(42.2, 13.5), control: p(43.7, 11))
+            path.move(to: p(44, 6.8))
+            path.addQuadCurve(to: p(44, 15.2), control: p(46.6, 11))
+            return path
         }
     }
 }

@@ -139,7 +139,6 @@ struct TempScreen: View {
                     case .sides:
                         ScrollView {
                             BothSidesView(curve: activeCurve)
-                            NoiseCard().padding(.horizontal, 16).padding(.bottom, 24)
                         }
                             .refreshable { await deviceManager.fetchStatus(); await fetchActiveCurve() }
                     }
@@ -151,11 +150,6 @@ struct TempScreen: View {
             .navigationTitle(profile.tempControl == .sides ? "Bed" : "")
             .navigationBarTitleDisplayMode(profile.tempControl == .sides ? .large : .inline)
             .settingsToolbar()
-            .toolbar {
-                if deviceManager.isConnected {
-                    ToolbarItem(placement: .topBarTrailing) { NoiseButton() }
-                }
-            }
             .toolbar {
                 switch profile.tempControl {
                 case .dial, .stepper:
@@ -213,7 +207,6 @@ struct TempScreen: View {
                             tonightCard(curve)
                         }
                     }
-                    NoiseCard()
                 }
                 .padding(.top, 24)
             }
@@ -261,8 +254,7 @@ struct TempScreen: View {
         return VStack(alignment: .leading, spacing: 3) {
             Text(sideName).font(.title2.bold()).tracking(-0.3).lineLimit(1)
             HStack(spacing: 6) {
-                if occupied { StatusDot() }
-                Eyebrow("\(place) · \(occupied ? "IN BED" : "AWAY")")
+                InBedLabel(place: place, sides: deviceManager.isLinked ? [.left, .right] : [side], streamGuess: occupied)
                 if APIBackend.current.isDemo && !DebugRoute.marketingCapture { Eyebrow("· DEMO", color: Theme.amber) }
             }
         }

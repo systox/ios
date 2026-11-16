@@ -71,8 +71,7 @@ private struct SideTempCard: View {
                 HStack(spacing: 8) {
                     Text(settings.sideName(for: side)).font(.headline).lineLimit(1)
                     HStack(spacing: 5) {
-                        if occupied { StatusDot() }
-                        Eyebrow("\(side.rawValue.uppercased()) · \(occupied ? "IN BED" : "AWAY")")
+                        InBedLabel(place: side.rawValue.uppercased(), sides: [side], streamGuess: occupied)
                     }
                 }
                 Spacer(minLength: 8)
